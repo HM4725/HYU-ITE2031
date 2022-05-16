@@ -3,14 +3,19 @@
 #include <string.h>
 
 #define MAXLINELENGTH 1000
-#define NOEXIST 0xF0000000
+#define MAXLABELSIZE  6
+#define MAXINT16 32767
+#define MININT16 (-32768)
+#define MAXINT32 2147483647
+#define MININT32 (-2147483648)
 
+// Types ///////////////////////////////////////////
 typedef int word_t;
-enum symType {LABEL, DATA};
+typedef short half_t;
 enum instType {RTYPE, ITYPE, JTYPE, OTYPE};
 
 struct symbol{
-  char name[MAXLINELENGTH];
+  char name[MAXLABELSIZE+2];
   word_t word;
   struct symbol *next;
 };
@@ -50,8 +55,11 @@ typedef union instruction {
   word_t  x32;
 } instruction;
 
-static struct symbol *label0;
-static struct symbol *data0;
+// Globals ///////////////////////////////////////////
+static struct symbol *entry;
+static struct symbol notfound = {
+  "404", 0, 0
+};
 static struct isa {
   char *name;
   int opcode;
@@ -66,17 +74,48 @@ static struct isa {
   {"halt", 6, OTYPE},
   {"noop", 7, OTYPE},
 };
+static int pc;
 
+// Errors ///////////////////////////////////////////
+#define ER_WRONGUSAGE   0
+#define ER_OPENFILE     1
+#define ER_LINEOVFL     2
+#define ER_UNRECOGNIZE  3
+#define ER_WRONGREG     4
+#define ER_INSUFFICIENT 5
+#define ER_WORDOVFL     6
+#define ER_OFFSETOVFL   7
+#define ER_LABELINVALID 8
+#define ER_DUPLICATE    9
+#define ER_UNDEFINED    10
+
+char* errorMsg[] = {
+  [ER_WRONGUSAGE]   "usage: assemble <assembly-code-file> <machine-code-file>",
+  [ER_OPENFILE]     "error in opening file",
+  [ER_LINEOVFL]     "line too long",
+  [ER_UNRECOGNIZE]  "unrecognized opcode",
+  [ER_WRONGREG]     "register number must be 0 to 7",
+  [ER_INSUFFICIENT] "insufficient instruction",
+  [ER_WORDOVFL]     "bounds are -2147483648 to 2147483647 in 32bits",
+  [ER_OFFSETOVFL]   "offsetFields that don't fit in 16bits",
+  [ER_LABELINVALID] "valid labels contain a maximum of 6 characters and can consist of letters and numbers (but must start with a letter)",
+  [ER_DUPLICATE]    "duplicate labels",
+  [ER_UNDEFINED]    "use of undefined label",
+};
+
+// Functions ///////////////////////////////////////////
 instruction translate(int, char*, char*, char*, char*);
-struct symbol* addLabel(char*, word_t);
-struct symbol* addData(char*, char*);
-word_t  readLabel(char*);
-word_t  readData(char*);
+void addLabel(char*, word_t);
+struct symbol*  readLabel(const char*);
+#ifdef _DEBUG
 void    checkLabels();
-void    checkData();
+#else
+#define checkLabels() {}
+#endif
 void    freeSymbols();
-int     readAndParse(FILE *, char *, char *, char *, char *, char *);
-int     isNumber(char *);
+int     readAndParse(FILE*, char*, char*, char*, char*, char*);
+int     isNumber(const char*);
+void    raiseError(int, const char*);
 
 ///////////////////////////////////////////////////////////
 //                      main start                       //
@@ -85,25 +124,22 @@ int main(int argc, char *argv[]){
   char *inFileString, *outFileString;
   FILE *inFilePtr, *outFilePtr;
   char label[MAXLINELENGTH], opcode[MAXLINELENGTH], arg0[MAXLINELENGTH], arg1[MAXLINELENGTH], arg2[MAXLINELENGTH];
-  int pc;
   instruction inst;
+  struct symbol *symbol;
 
   if(argc != 3){
-    printf("error: usage: %s <assembly-code-file> <machine-code-file>\n", argv[0]);
-    exit(1);
+    raiseError(ER_WRONGUSAGE, argv[0]);
   }
 
   inFileString = argv[1];
   outFileString = argv[2];
   inFilePtr = fopen(inFileString, "r");
   if(inFilePtr == NULL){
-    printf("error in opening %s\n", inFileString);
-    exit(1);
+    raiseError(ER_OPENFILE, inFileString);
   }
   outFilePtr = fopen(outFileString, "w");
   if(outFilePtr == NULL) {
-    printf("error in opening %s\n", outFileString);
-    exit(1); 
+    raiseError(ER_OPENFILE, outFileString);
   }
 
   // 1. First pass: calculate the address for every symbolic label
@@ -111,40 +147,41 @@ int main(int argc, char *argv[]){
   while(readAndParse(inFilePtr, label, opcode, arg0, arg1, arg2)){
     if(strlen(label) > 0){
       addLabel(label, pc);
-      if(!strcmp(opcode, ".fill")){
-        addData(label, arg0);
-      }
     }
     pc++;
   }
   rewind(inFilePtr);
 
+  checkLabels();
   // 2. Second pass: generate a machine-language instruction (in decimal)
   pc = 0;
   while(readAndParse(inFilePtr, label, opcode, arg0, arg1, arg2)){
-    if(!strcmp(opcode, ".fill")){
-      inst.x32 = readData(label);
-    } else {
-      inst = translate(pc, opcode, label, arg1, arg2);
-    }
+    if(opcode[0] == '\0')
+      continue;
+    inst = translate(pc, opcode, arg0, arg1, arg2);
+#ifdef _DEBUG
     fprintf(outFilePtr, "(address %d): %d (hex 0x%x)\n", pc, inst.x32, inst.x32);
+#else
+    fprintf(outFilePtr, "%d\n", inst.x32);
+#endif
     pc++;
   }
   freeSymbols();
-  return (0); 
+
+  exit(0);
 }
 ///////////////////////////////////////////////////////////
 //                      main end                         //
 ///////////////////////////////////////////////////////////
 
-struct symbol* __addSymbol(char name[], word_t word, enum symType type){
-  struct symbol **entry, **itr;
+
+// Definitions ///////////////////////////////////////////
+void __addSymbol(char name[], word_t word){
+  struct symbol **itr;
   struct symbol *sym, *prev;
 
-  entry = type == LABEL ? &label0 : &data0;
-
   prev = 0;
-  itr = entry;
+  itr = &entry;
   sym = *itr;
   while(sym != 0){
     prev = sym;
@@ -154,133 +191,182 @@ struct symbol* __addSymbol(char name[], word_t word, enum symType type){
   
   *itr = (struct symbol*)malloc(sizeof(struct symbol));
   sym = *itr;
-  strncpy(sym->name, name, MAXLINELENGTH);
+  strncpy(sym->name, name, MAXLABELSIZE+1);
   sym->word = word;
   sym->next = 0;
   if(prev) prev->next = sym;
-  
-  return sym;
 }
-word_t __readSymbol(char name[], enum symType type){
-  struct symbol *entry, *itr;
-
-  entry = type == LABEL ? label0 : data0;
+struct symbol* __readSymbol(const char name[]){
+  struct symbol *itr;
 
   for(itr = entry; itr != 0; itr = itr->next){
     if(!strcmp(name, itr->name))
-      return itr->word;
+      return itr;
   }
-  return NOEXIST;
+  return &notfound;
 }
-word_t __checkSymbols(enum symType type){
-  struct symbol *entry, *itr;
+#ifdef _DEBUG
+void __checkSymbols(){
+  struct symbol *itr;
 
-  entry = type == LABEL ? label0 : data0;
+  printf("Symbols : Address\n");
   itr = entry;
   while(itr != 0){
-    printf("%s: %d\n", itr->name, itr->word);
+    printf("  %6s: %d\n", itr->name, itr->word);
     itr = itr->next;
   }
 }
-void __freeSymbols(enum symType type){
-  struct symbol *entry, *itr, *nxt;
+#endif
+void __freeSymbols(){
+  struct symbol *itr, *nxt;
 
-  entry = type == LABEL ? label0 : data0;
+  itr = entry;
   while(itr != 0){
     nxt = itr->next;
     free(itr);
     itr = nxt;
   }
 }
+int __isValidLabel(char name[]){
+  if(strlen(name) > MAXLABELSIZE)
+    return 0;
+  if((name[0] >= 'A' && name[0] <= 'Z')
+     || (name[0] >= 'a' && name[0] <= 'z'))
+    return 1;
+  else
+    return 0;
+}
 
-struct symbol* addLabel(char name[], word_t word){
-  return __addSymbol(name, word, LABEL);
+void addLabel(char name[], word_t word){
+  if(__isValidLabel(name) == 0)
+    raiseError(ER_LABELINVALID, name);
+  if(__readSymbol(name) != &notfound)
+    raiseError(ER_DUPLICATE, name);
+  __addSymbol(name, word);
 }
-struct symbol* addData(char name[], char data[]){
-  word_t word;
-  word = isNumber(data) ? atoi(data) : __readSymbol(data, LABEL);
-  return word != NOEXIST ? __addSymbol(name, word, DATA) : 0;
+struct symbol* readLabel(const char name[]){
+  return __readSymbol(name);
 }
-word_t readLabel(char name[]){
-  return __readSymbol(name, LABEL);
-}
-word_t readData(char name[]){
-  return __readSymbol(name, DATA);
-}
+#ifdef _DEBUG
 void checkLabels(){
-  __checkSymbols(LABEL);
+  __checkSymbols();
 }
-void checkData(){
-  __checkSymbols(DATA);
-}
+#endif
 void freeSymbols(){
-  __freeSymbols(LABEL);
-  __freeSymbols(DATA);
+  __freeSymbols();
 }
+
 ///////////////////////////////////////////////////////////
+int __getReg(const char reg[]){
+  if(strlen(reg) != 1)
+    goto bad;
+  if(reg[0] < '0' || reg[0] > '7')
+    goto bad;
+
+  return reg[0] - '0';
+bad:
+  raiseError(ER_WRONGREG, reg);
+}
+half_t __getOffset(const int pc, const char opcode[], const char arg[]){
+  word_t offset;
+  long tmp;
+  struct symbol *symbol;
+
+  if(isNumber(arg)){
+    tmp = atol(arg);
+    if(tmp < MININT32 || tmp > MAXINT32)
+      raiseError(ER_WORDOVFL, arg);
+    offset = (word_t)tmp;
+  } else {
+    symbol = readLabel(arg);
+    if(symbol != &notfound){
+      offset = strcmp(opcode, "beq") == 0 ?
+                 symbol->word - pc - 1 : symbol->word;
+    } else {
+      raiseError(ER_UNDEFINED, arg);
+    }
+  }
+  if(offset < MININT16 || offset > MAXINT16){
+    raiseError(ER_OFFSETOVFL, arg);
+  }
+  return (half_t)offset;
+}
+word_t __getData(const char arg[]){
+  word_t data;
+  long tmp;
+  struct symbol *symbol;
+
+  if(isNumber(arg)){
+    tmp = atol(arg);
+    if(tmp < MININT32 || tmp > MAXINT32)
+      raiseError(ER_WORDOVFL, arg);
+    data = (word_t)tmp;
+  } else {
+    symbol = readLabel(arg);
+    if(symbol != &notfound){
+      data = symbol->word;
+    } else {
+      raiseError(ER_UNDEFINED, arg);
+    }
+  }
+  return data;
+}
 instruction translate(int pc, char opcode[], char arg0[], char arg1[], char arg2[]){
-  int i, sz, sym, zero = 0;
+  int i, sz, offset, zero = 0;
+  struct symbol *symbol;
   instruction inst;
 
+  // Case1) Instructions
   sz = sizeof(isa)/sizeof(isa[0]);
   for(i = 0; i < sz; i++){
     if(!strcmp(isa[i].name, opcode)){
       switch(isa[i].format){
         case RTYPE:
+          if(arg0[0] == '\0' || arg1[0] == '\0' || arg2[0] == '\0')
+            raiseError(ER_INSUFFICIENT, opcode);
           inst.r.unused  = zero;
           inst.r.opcode  = isa[i].opcode;
-          inst.r.regA    = atoi(arg0);
-          inst.r.regB    = atoi(arg1);
+          inst.r.regA    = __getReg(arg0);
+          inst.r.regB    = __getReg(arg1);
           inst.r.unused2 = zero;
-          inst.r.destReg = atoi(arg2);
-          break;
+          inst.r.destReg = __getReg(arg2);
+          return inst;
         case ITYPE:
+          if(arg0[0] == '\0' || arg1[0] == '\0' || arg2[0] == '\0')
+            raiseError(ER_INSUFFICIENT, opcode);
           inst.i.unused = zero;
           inst.i.opcode = isa[i].opcode;
-          inst.i.regA   = atoi(arg0);
-          inst.i.regB   = atoi(arg1);
-          if(isNumber(arg2)){
-            inst.i.offset = atoi(arg2);
-          } else if((sym = readLabel(arg2)) != NOEXIST){
-            inst.i.offset = strcmp(opcode, "beq") == 0 ?
-                              sym - pc - 1 : sym;
-          } else {
-            printf("The symbol does not exist!\n");
-            inst.x32 = 0;
-          }
-          break;
+          inst.i.regA   = __getReg(arg0);
+          inst.i.regB   = __getReg(arg1);
+          inst.i.offset = __getOffset(pc, opcode, arg2);
+          return inst;
         case JTYPE:
+          if(arg0[0] == '\0' || arg1[0] == '\0')
+            raiseError(ER_INSUFFICIENT, opcode);
           inst.j.unused  = zero;
           inst.j.opcode  = isa[i].opcode;
-          inst.j.regA    = atoi(arg0);
-          inst.j.regB    = atoi(arg1);
+          inst.j.regA    = __getReg(arg0);
+          inst.j.regB    = __getReg(arg1);
           inst.j.unused2 = zero;
-          break;
+          return inst;
         case OTYPE:
           inst.o.unused  = zero;
           inst.o.opcode  = isa[i].opcode;
           inst.o.unused2 = zero;
-          break;
-        default: // .fill
-          printf("Not supported Instruction");
-          inst.x32 = 0;
+          return inst;
       }
     }
   }
-  return inst;
+  // Case2) Assembler directives
+  if(!strcmp(opcode, ".fill")){
+    inst.x32 = __getData(arg0);
+    return inst;
+  }
+
+  raiseError(ER_UNRECOGNIZE, opcode);
 }
+
 ///////////////////////////////////////////////////////////
-/*
- * Read and parse a line of the assembly-language file.
- * Fields are returned in label, opcode, arg0, arg1, arg2
- * (these strings must have memory already allocated to them).
- *
- * Return values:
- *   0 if reached end of file
- *   1 if all went well
- *
- * exit(1) if line is too long.
- */
 int readAndParse(FILE *inFilePtr, char *label, char *opcode, char *arg0, char *arg1, char *arg2){
   char line[MAXLINELENGTH];
   char *ptr = line;
@@ -293,9 +379,7 @@ int readAndParse(FILE *inFilePtr, char *label, char *opcode, char *arg0, char *a
   }
   /* check for line too long (by looking for a \n) */
   if (strchr(line, '\n') == NULL) {
-    /* line too long */
-    printf("error: line too long\n");
-    exit(1);
+    raiseError(ER_LINEOVFL, line);
   }
   /* is there a label? */
   ptr = line;
@@ -311,8 +395,19 @@ int readAndParse(FILE *inFilePtr, char *label, char *opcode, char *arg0, char *a
   return(1);
 }
 
-int isNumber(char *string){
+int isNumber(const char *string){
   /* return 1 if string is a number */
   int i;
   return( (sscanf(string, "%d", &i)) == 1);
 }
+
+///////////////////////////////////////////////////////////
+void raiseError(int code, const char msg[]){
+  if(code == ER_WRONGUSAGE || code == ER_OPENFILE)
+    printf("[ERROR] %s %s\n", errorMsg[code], msg);
+  else
+    printf("[ERROR] address %d: %s (%s)\n", pc, errorMsg[code], msg);
+  exit(1);
+}
+
+// End //////////////////////////////////////////////////////
