@@ -3,7 +3,7 @@
         nor     0   0   3
         lw      0   1   data    ; i-format
         sw      0   1   data
-        jalr    0   0   10      ; j-format
+        jalr    1   1   10      ; j-format
         noop    10  10  10      ; o-format
         halt    10  10  10
 data    .fill   data

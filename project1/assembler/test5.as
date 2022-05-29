@@ -8,7 +8,7 @@ start   add  0   0   1
         jalr 5   6
         noop
         noop
-next    jalr 0   0
+next    jalr 4   4
         noop
         noop
 done    halt
