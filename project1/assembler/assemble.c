@@ -125,7 +125,6 @@ int main(int argc, char *argv[]){
   FILE *inFilePtr, *outFilePtr;
   char label[MAXLINELENGTH], opcode[MAXLINELENGTH], arg0[MAXLINELENGTH], arg1[MAXLINELENGTH], arg2[MAXLINELENGTH];
   instruction inst;
-  struct symbol *symbol;
 
   if(argc != 3){
     raiseError(ER_WRONGUSAGE, argv[0]);
@@ -145,6 +144,8 @@ int main(int argc, char *argv[]){
   // 1. First pass: calculate the address for every symbolic label
   pc = 0;
   while(readAndParse(inFilePtr, label, opcode, arg0, arg1, arg2)){
+    if(opcode[0] == '\0')
+      continue;
     if(strlen(label) > 0){
       addLabel(label, pc);
     }
@@ -266,6 +267,7 @@ int __getReg(const char reg[]){
   return reg[0] - '0';
 bad:
   raiseError(ER_WRONGREG, reg);
+  return -1;
 }
 half_t __getOffset(const int pc, const char opcode[], const char arg[]){
   word_t offset;
@@ -312,9 +314,8 @@ word_t __getData(const char arg[]){
   return data;
 }
 instruction translate(int pc, char opcode[], char arg0[], char arg1[], char arg2[]){
-  int i, sz, offset, zero = 0;
-  struct symbol *symbol;
-  instruction inst;
+  int i, sz, zero = 0;
+  instruction inst = {0,};
 
   // Case1) Instructions
   sz = sizeof(isa)/sizeof(isa[0]);
@@ -364,6 +365,7 @@ instruction translate(int pc, char opcode[], char arg0[], char arg1[], char arg2
   }
 
   raiseError(ER_UNRECOGNIZE, opcode);
+  return inst;
 }
 
 ///////////////////////////////////////////////////////////

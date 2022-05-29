@@ -2,7 +2,7 @@
         lw  0   1   one  ; reg1: 1
         add 0   6   2    ; reg2: ptr
 loop    lw  2   3   0    ; reg3: *ptr
-        beq 2   0   done ; while(*ptr != '\0')
+        beq 3   0   done ; while(*ptr != '\0')
         noop             ; something like print
         noop
         noop
