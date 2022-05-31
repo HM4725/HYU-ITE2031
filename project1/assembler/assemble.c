@@ -406,9 +406,9 @@ int isNumber(const char *string){
 ///////////////////////////////////////////////////////////
 void raiseError(int code, const char msg[]){
   if(code == ER_WRONGUSAGE || code == ER_OPENFILE)
-    printf("[ERROR] %s %s\n", errorMsg[code], msg);
+    fprintf(stderr, "[ERROR] %s %s\n", errorMsg[code], msg);
   else
-    printf("[ERROR] address %d: %s (%s)\n", pc, errorMsg[code], msg);
+    fprintf(stderr, "[ERROR] address %d: %s (%s)\n", pc, errorMsg[code], msg);
   exit(1);
 }
 
