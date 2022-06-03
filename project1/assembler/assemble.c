@@ -360,6 +360,8 @@ instruction translate(int pc, char opcode[], char arg0[], char arg1[], char arg2
   }
   // Case2) Assembler directives
   if(!strcmp(opcode, ".fill")){
+    if(arg0[0] == '\0')
+      raiseError(ER_INSUFFICIENT, opcode);
     inst.x32 = __getData(arg0);
     return inst;
   }
