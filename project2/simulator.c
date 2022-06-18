@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define MAXLINELENGTH 1024
+#define MAXLINELENGTH 1000
 #define NUMMEMORY 65536 /* maximum number of data words in memory */
 #define NUMREGS 8 /* number of machine registers */
 
@@ -65,7 +65,7 @@ typedef struct stateStruct {
 ////
 
 // Sign Extend
-#define signExtend(v) ({                    \
+#define convertNum(v) ({                    \
   const short __unext_v16 = (v);            \
   const int   __ext_v32 = (int)__unext_v16; \
   __ext_v32;})
@@ -75,18 +75,12 @@ typedef struct stateStruct {
 #define ER_OPENFILE       1
 #define ER_WRONGADDRESS   2
 #define ER_OUTOFBOUNDMEM  3
-#define ER_OUTOFBOUNDREG  5
-#define ER_UNRECOGNIZE    6
-#define ER_WRITEREG0      7
 
 char* errorMsg[] = {
   [ER_WRONGUSAGE]     "usage: simulate <machine-code file>",
   [ER_OPENFILE]       "error in opening file",
   [ER_WRONGADDRESS]   "error in reading address",
   [ER_OUTOFBOUNDMEM]  "memory address out of bound",
-  [ER_OUTOFBOUNDREG]  "register number out of bound",
-  [ER_UNRECOGNIZE]    "unrecognized opcode",
-  [ER_WRITEREG0]      "illegal write to register 0",
 };
 
 #ifdef _DEBUG
@@ -130,6 +124,7 @@ int main(int argc, char *argv[])
   FILE *filePtr;
   int instCount;
   stateType state;
+  int mem;
 
   if (argc != 2)
     raiseErrorMsg(ER_WRONGUSAGE, argv[0]);
@@ -140,11 +135,17 @@ int main(int argc, char *argv[])
 
   /* read in the entire machine-code file into memory */
   for (state.numMemory = 0; fgets(line, MAXLINELENGTH, filePtr) != NULL; state.numMemory++) {
-    if (sscanf(line, "%d", state.instrMem+state.numMemory) != 1)
+    if (sscanf(line, "%d", &mem) != 1)
       raiseError(ER_WRONGADDRESS, state.numMemory);
-    if (sscanf(line, "%d", state.dataMem+state.numMemory) != 1)
-      raiseError(ER_WRONGADDRESS, state.numMemory);
-    printf("memory[%d]=%d\n", state.numMemory, state.instrMem[state.numMemory]);
+    state.instrMem[state.numMemory] = mem;
+    state.dataMem[state.numMemory] = mem;
+    printf("memory[%d]=%d\n", state.numMemory, mem);
+  }
+  printf("%d memory words\n", state.numMemory);
+  printf("\tinstruction memory:\n");
+  for(int i = 0; i < state.numMemory; i++){
+    printf("\t\tinstrMem[ %d ] ", i);
+    printInstruction(state.instrMem[i]);
   }
 
   run(&state);
@@ -155,36 +156,6 @@ int main(int argc, char *argv[])
 //                      main end                         //
 ///////////////////////////////////////////////////////////
 
-// Register&Memory R/W
-/*
-static word_t __readReg(stateType *statePtr, word_t reg)
-{
-  if(reg > NUMREGS)
-    raiseError(ER_OUTOFBOUNDREG, reg);
-  return statePtr->reg[reg]; 
-}
-
-static void __writeReg(stateType *statePtr, word_t reg, word_t data)
-{
-  if(reg == 0)
-    raiseError(ER_WRITEREG0, statePtr->pc);
-  statePtr->reg[reg] = data;
-}
-
-static word_t __readMem(stateType *statePtr, word_t addr)
-{
-  if(addr >= statePtr->numMemory)
-    raiseError(ER_OUTOFBOUNDMEM, addr);
-  return statePtr->mem[addr];
-}
-
-static void __writeMem(stateType *statePtr, word_t addr, word_t data)
-{
-  if(addr >= statePtr->numMemory)
-    raiseError(ER_OUTOFBOUNDMEM, addr);
-  statePtr->mem[addr] = data;
-}
-*/
 // Initialize State
 void __initState(stateType *statePtr, const stateType *prototype)
 {
@@ -199,29 +170,35 @@ void __initState(stateType *statePtr, const stateType *prototype)
   statePtr->WBEND.instr = NOOPINSTRUCTION;
 }
 
-// 5-stages pipeline
+// 5-stages Pipeline
 void fetch(stateType *newStatePtr, const stateType *statePtr)
 {
-  newStatePtr->pc = statePtr->pc + 1;
+  if(statePtr->pc < 0 || statePtr->pc >= NUMMEMORY)
+    raiseError(ER_OUTOFBOUNDMEM, statePtr->pc);
   newStatePtr->IFID.instr = statePtr->instrMem[statePtr->pc];
   newStatePtr->IFID.pcPlus1 = statePtr->pc + 1;
+  newStatePtr->pc = statePtr->pc + 1;
 }
 
 void decode(stateType *newStatePtr, const stateType *statePtr)
 {
   int instr = statePtr->IFID.instr;
+  int regA = field0(instr);
+  int regB = field1(instr);
+
   newStatePtr->IDEX.pcPlus1 = statePtr->IFID.pcPlus1;
   newStatePtr->IDEX.instr = instr;
-  newStatePtr->IDEX.readRegA = \
-    statePtr->reg[field0(instr)];
-  newStatePtr->IDEX.readRegB = \
-    statePtr->reg[field1(instr)];
-  newStatePtr->IDEX.offset = signExtend(field2(instr));
+  newStatePtr->IDEX.readRegA = regA == 0 ?
+    0 : statePtr->reg[field0(instr)];
+  newStatePtr->IDEX.readRegB = regB == 0 ?
+    0 : statePtr->reg[field1(instr)];
+  newStatePtr->IDEX.offset = convertNum(field2(instr));
 }
 
 void execute(stateType *newStatePtr, const stateType *statePtr)
 {
   int instr = statePtr->IDEX.instr;
+
   newStatePtr->EXMEM.instr = instr;
   newStatePtr->EXMEM.branchTarget = \
     statePtr->IDEX.pcPlus1 + statePtr->IDEX.offset;
@@ -237,9 +214,6 @@ void execute(stateType *newStatePtr, const stateType *statePtr)
         ~(statePtr->IDEX.readRegA | statePtr->IDEX.readRegB);
       break;
     case LW:
-      newStatePtr->EXMEM.aluResult = \
-        statePtr->IDEX.readRegA + statePtr->IDEX.offset;
-      break;
     case SW:
       newStatePtr->EXMEM.aluResult = \
         statePtr->IDEX.readRegA + statePtr->IDEX.offset;
@@ -256,22 +230,24 @@ void execute(stateType *newStatePtr, const stateType *statePtr)
 void memory(stateType *newStatePtr, const stateType *statePtr)
 {
   int instr = statePtr->EXMEM.instr;
+  int aluResult = statePtr->EXMEM.aluResult;
+
   newStatePtr->MEMWB.instr = instr;
 
   switch(opcode(instr)){
     case ADD:
-      newStatePtr->MEMWB.writeData = statePtr->EXMEM.aluResult;
-      break;
     case NOR:
-      newStatePtr->MEMWB.writeData = statePtr->EXMEM.aluResult;
+      newStatePtr->MEMWB.writeData = aluResult;
       break;
     case LW:
-      newStatePtr->MEMWB.writeData = \
-        statePtr->dataMem[statePtr->EXMEM.aluResult];
+      if(aluResult < 0 || aluResult >= NUMMEMORY)
+        raiseError(ER_OUTOFBOUNDMEM, aluResult);
+      newStatePtr->MEMWB.writeData = statePtr->dataMem[aluResult];
       break;
     case SW:
-      newStatePtr->dataMem[statePtr->EXMEM.aluResult] = \
-        statePtr->EXMEM.readRegB;
+      if(aluResult < 0 || aluResult >= NUMMEMORY)
+        raiseError(ER_OUTOFBOUNDMEM, aluResult);
+      newStatePtr->dataMem[aluResult] = statePtr->EXMEM.readRegB;
       break;
     case BEQ:
       if(statePtr->EXMEM.aluResult == 0){
@@ -290,14 +266,12 @@ void writeback(stateType *newStatePtr, const stateType *statePtr)
   int instr = statePtr->MEMWB.instr;
   int writeData = statePtr->MEMWB.writeData;
   int destReg;
+
   newStatePtr->WBEND.instr = instr;
   newStatePtr->WBEND.writeData = writeData;
 
   switch(opcode(instr)){
     case ADD:
-      destReg = (instr & 0x7);
-      newStatePtr->reg[destReg] = writeData;
-      break;
     case NOR:
       destReg = (instr & 0x7);
       newStatePtr->reg[destReg] = writeData;
@@ -311,6 +285,7 @@ void writeback(stateType *newStatePtr, const stateType *statePtr)
   }
 }
 
+// Main Run Method
 void run(stateType *prototype)
 {
   stateType state = {0,};
